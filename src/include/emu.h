@@ -196,6 +196,7 @@ typedef struct config_info {
        int     X_pm_interface;		/* support protected mode interface */
        int     X_background_pause;	/* pause xdosemu if it loses focus */
        boolean sdl_hwrend;		/* accelerate SDL with OpenGL */
+       char    *sdl_font;		/* TTF font used in SDL2 */
        boolean fullrestore;
        boolean force_vt_switch;         /* in case of console_video force switch to emu VT at start */
        int     dualmon;

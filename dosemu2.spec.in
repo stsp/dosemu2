@@ -17,6 +17,8 @@ URL: www.github.com/stsp/dosemu2
 Source0: %{name}-%{version}.tar.gz
 
 BuildRequires: SDL2-devel
+BuildRequires: SDL2_ttf-devel
+BuildRequires: fontconfig-devel
 BuildRequires: SDL-devel
 BuildRequires: libXext-devel
 BuildRequires: alsa-lib-devel
@@ -44,6 +46,8 @@ BuildRequires: fdpp
 # the below is not strictly required, as dosemu can dynamically
 # load plugins.
 Recommends: SDL2
+Recommends: SDL2_ttf
+Recommends: fontconfig
 Recommends: SDL
 Recommends: libXext
 Recommends: alsa-lib

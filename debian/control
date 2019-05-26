@@ -23,6 +23,8 @@ Build-Depends:
     libgpm-dev,
     libasound2-dev,
     libsdl2-dev,
+    libsdl2-ttf-dev,
+    libfontconfig1-dev,
     libsdl1.2-dev,
     ladspa-sdk,
     libfluidsynth-dev,
