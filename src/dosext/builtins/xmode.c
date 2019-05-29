@@ -21,18 +21,6 @@
 #define stderr	com_stderr
 #define intr    com_intr
 
-/* should sync with src/env/video/X.h */
-#define X_CHG_TITLE     1
-#define X_CHG_FONT      2
-#define X_CHG_MAP       3
-#define X_CHG_UNMAP     4
-#define X_CHG_WINSIZE    5
-#define X_CHG_TITLE_EMUNAME	6
-#define X_CHG_TITLE_APPNAME	7
-#define X_CHG_TITLE_SHOW_APPNAME	8
-#define X_CHG_BACKGROUND_PAUSE	9
-#define X_CHG_FULLSCREEN	11
-
 static int X_change_config(unsigned, void *);
 
 int xmode_main(int argc, char **argv)
@@ -60,7 +48,7 @@ int xmode_main(int argc, char **argv)
 
   while(argc) {
     if(!strcmp(*argv, "-title") && argc >= 2) {
-      X_change_config(X_CHG_TITLE_EMUNAME, argv[1]);
+      X_change_config(CHG_TITLE_EMUNAME, argv[1]);
       argc -= 2; argv += 2;
     }
     else if (!strcmp(*argv, "-showapp") && argc >= 2) {
@@ -69,11 +57,11 @@ int xmode_main(int argc, char **argv)
       else
 	l = 1;
 
-      X_change_config(X_CHG_TITLE_SHOW_APPNAME, &l);
+      X_change_config(CHG_TITLE_SHOW_APPNAME, &l);
       argc -= 2; argv += 2;
     }
     else if(!strcmp(*argv, "-font") && argc >= 2) {
-      X_change_config(X_CHG_FONT, argv[1]);
+      X_change_config(CHG_FONT, argv[1]);
       argc -= 2; argv += 2;
     }
     else if(!strcmp(*argv, "-map") && argc >= 2) {
@@ -82,7 +70,7 @@ int xmode_main(int argc, char **argv)
         fprintf(stderr, "invalid mode number \"%s\"\n", argv[1]);
         return 2;
       }
-      X_change_config(X_CHG_MAP, &l);
+      X_change_config(CHG_MAP, &l);
       argc -= 2; argv += 2;
     }
     else if(!strcmp(*argv, "-unmap") && argc >= 2) {
@@ -91,7 +79,7 @@ int xmode_main(int argc, char **argv)
         fprintf(stderr, "invalid mode number \"%s\"\n", argv[1]);
         return 2;
       }
-      X_change_config(X_CHG_UNMAP, &l);
+      X_change_config(CHG_UNMAP, &l);
       argc -= 2; argv += 2;
     }
     else if(!strcmp(*argv, "-winsize") && argc >= 3) {
@@ -105,7 +93,7 @@ int xmode_main(int argc, char **argv)
         fprintf(stderr, "invalid height \"%s\"\n", argv[2]);
         return 2;
       }
-      X_change_config(X_CHG_WINSIZE, ll);
+      X_change_config(CHG_WINSIZE, ll);
       argc -= 3; argv += 3;
     }
     else if(!strcmp(*argv, "-mode") && argc >= 2) {
@@ -135,7 +123,7 @@ int xmode_main(int argc, char **argv)
       else
 	l = 1;
 
-      X_change_config(X_CHG_BACKGROUND_PAUSE, &l);
+      X_change_config(CHG_BACKGROUND_PAUSE, &l);
       argc -= 2; argv += 2;
     }
     else if (!strcmp(*argv, "-fullscreen") && argc >= 2) {
@@ -144,7 +132,7 @@ int xmode_main(int argc, char **argv)
       else
 	l = 1;
 
-      X_change_config(X_CHG_FULLSCREEN, &l);
+      X_change_config(CHG_FULLSCREEN, &l);
       argc -= 2; argv += 2;
     }
     else {
