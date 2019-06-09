@@ -1,2 +1,7 @@
 debian/dosemu.desktop usr/share/applications/
 etc/dosemu2.alias etc/X11/fonts/misc/
+etc/ttf/Flexi_IBM_VGA9_False_437.ttf /usr/share/fonts/truetype/dosemu2/
+etc/ttf/Flexi_IBM_VGA9_False.ttf /usr/share/fonts/truetype/dosemu2/
+etc/ttf/Flexi_IBM_VGA9_True_437.ttf /usr/share/fonts/truetype/dosemu2/
+etc/ttf/Flexi_IBM_VGA9_True.ttf /usr/share/fonts/truetype/dosemu2/
+etc/ttf/README.oldskool /usr/share/doc/dosemu2/

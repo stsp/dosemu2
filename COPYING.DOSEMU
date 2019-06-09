@@ -315,3 +315,22 @@ comp.fonts.  Your comments are both welcome and encouraged.
    *-[Unquote]---------------------------------------------------------*
 
 
+-------------------------------------------------------------------------------
+FLEXI IBM VGA9 FONTS:  Scalable TrueType fonts based on the iconic hardware
+                       VGA character set.
+
+INCLUDED FONTS:
+
+* Flexi IBM VGA9 True:       Corrected aspect ratio, extended character set
+* Flexi IBM VGA9 True 437:   Corrected aspect ratio, CP437/DOS encoding
+* Flexi IBM VGA9 False:      Uncorrected aspect ratio, extended character set
+* Flexi IBM VGA9 False 437:  Uncorrected aspect ratio, CP437/DOS encoding
+
+LICENSE:
+
+  These fonts are released under the Creative Commons Attribution-ShareAlike
+  4.0 International license: http://creativecommons.org/licenses/by-sa/4.0/
+
+_________________________________________
+
+// VileR    2018-05    https://int10.org
