@@ -107,6 +107,7 @@ static TTF_Font *sdl_font;
 static SDL_RWops *sdl_font_rw;
 static int sdl_font_idx;
 static int pointsize;
+static int offset_x, offset_y;
 static SDL_Color text_colors[16];
 static struct text_system Text_SDL;
 #endif
@@ -181,15 +182,34 @@ static int SDL_priv_init(void)
   return 0;
 }
 
-static void SDL_text_init(void)
 #if defined(HAVE_SDL2_TTF) && defined(HAVE_FONTCONFIG)
+static void SDL_calculate_ttf_params(int winx, int winy, int cols, int rows)
+{
+  // Ensure we fit both ways in fullscreen
+  pointsize = MIN(winx / ((cols * font_width) / pointsize),
+		  winy / ((rows * font_height) / pointsize));
+
+  // Update font and metrics
+  TTF_CloseFont(sdl_font);
+  SDL_RWseek(sdl_font_rw, 0, RW_SEEK_SET);
+  sdl_font = TTF_OpenFontRW(sdl_font_rw, sdl_font_idx, pointsize);
+  TTF_SizeText(sdl_font, "W", &font_width, NULL);
+  font_height = TTF_FontLineSkip(sdl_font);
+
+  // Calculate offsets to centre text in ill fitting window size
+  offset_x = (winx - (cols * font_width)) / 2;
+  offset_y = (winy - (rows * font_height)) / 2;
+
+  v_printf("SDL: TTF ps = %d, offx = %d, offy = %d\n", pointsize, offset_x, offset_y);
+}
+
+static void SDL_text_init(void)
 {
   int err;
   char *pth = NULL;
   FcPattern *pat, *match;
   FcResult result;
   char *foundname;
-  int tmp;
 
   use_bitmap_font = 1;
 
@@ -238,7 +258,9 @@ static void SDL_text_init(void)
     goto tidy_ttf;
   }
 
-  pointsize = 22; // value only used if we don't resize to X_winsize
+  pointsize = 22; // values only used if we don't resize to X_winsize
+  offset_x = 0;
+  offset_y = 0;
   sdl_font = TTF_OpenFontRW(sdl_font_rw, sdl_font_idx, pointsize);
   if (!sdl_font) {
     error("TTF_OpenFontRW: %s\n", TTF_GetError());
@@ -251,23 +273,12 @@ static void SDL_text_init(void)
   }
 
   // Some help for window sizing
-  TTF_SizeText(sdl_font, "W", &font_width, &tmp);
+  TTF_SizeText(sdl_font, "W", &font_width, NULL);
   font_height = TTF_FontLineSkip(sdl_font);
 
-  // Now choose nearest pointsize to best achieve X_winsize
+  // Now choose nearest pointsize to achieve best fit in X_winsize
   if (config.X_winsize_x && config.X_winsize_y) {
-    int newp = MIN(config.X_winsize_x / ((80 * font_width) / pointsize),
-                   config.X_winsize_y / ((25 * font_height) / pointsize));
-
-    // Reload the font at new size if we need to
-    if (newp != pointsize) {
-      pointsize = newp;
-      TTF_CloseFont(sdl_font);
-      SDL_RWseek(sdl_font_rw, 0, RW_SEEK_SET);
-      sdl_font = TTF_OpenFontRW(sdl_font_rw, sdl_font_idx, pointsize);
-      TTF_SizeText(sdl_font, "W", &font_width, &tmp);
-      font_height = TTF_FontLineSkip(sdl_font);
-    }
+    SDL_calculate_ttf_params(config.X_winsize_x, config.X_winsize_y, 80, 25);
   }
 
   register_text_system(&Text_SDL);
@@ -281,7 +292,8 @@ tidy_font_rw:
 tidy_ttf:
   TTF_Quit();
 }
-#else
+#else // no TTF
+static void SDL_text_init(void)
 {
   v_printf("SDL: TTF support not compiled in\n");
   use_bitmap_font = 1;
@@ -435,36 +447,6 @@ static void SDL_redraw(void)
 
   do_redraw_full();
 }
-
-#if defined(HAVE_SDL2_TTF) && defined(HAVE_FONTCONFIG)
-static void SDL_resize_to_nearest_fontsize(int xhint, int yhint)
-{
-  int xnewpointsize = xhint / ((vga.text_width * font_width) / pointsize);
-  int ynewpointsize = yhint / ((vga.text_height * font_height) / pointsize);
-  int xdelta = (xhint - vga.text_width * font_width);
-  int ydelta = (yhint - vga.text_height * font_height);
-  int tmp;
-
-  if (SDL_GetWindowFlags(window) & (	// Ensure we fit both ways in fullscreen
-      SDL_WINDOW_MAXIMIZED |
-      SDL_WINDOW_FULLSCREEN_DESKTOP |
-      SDL_WINDOW_FULLSCREEN))
-    pointsize = MIN(xnewpointsize, ynewpointsize);
-  else					// Major motion determines dominance
-    pointsize = abs(xdelta) > abs(ydelta) ? xnewpointsize : ynewpointsize;
-
-  TTF_CloseFont(sdl_font);
-  SDL_RWseek(sdl_font_rw, 0, RW_SEEK_SET);
-  sdl_font = TTF_OpenFontRW(sdl_font_rw, sdl_font_idx, pointsize);
-
-  TTF_SizeText(sdl_font, "W", &font_width, &tmp);
-  font_height = TTF_FontLineSkip(sdl_font);
-
-  SDL_change_mode(0, 0, vga.text_width * font_width, vga.text_height * font_height);
-
-  v_printf("SDL: resize pointsize %d, width %d, height %d\n", pointsize, m_x_res, m_y_res);
-}
-#endif
 
 static struct bitmap_desc lock_surface(void)
 {
@@ -849,7 +831,9 @@ static void SDL_handle_events(void)
       case SDL_WINDOWEVENT_RESIZED:
 #if defined(HAVE_SDL2_TTF) && defined(HAVE_FONTCONFIG)
         if (vga.mode_class == TEXT && !use_bitmap_font) {
-          SDL_resize_to_nearest_fontsize(event.window.data1, event.window.data2);
+          SDL_calculate_ttf_params(event.window.data1, event.window.data2,
+                                   vga.text_width, vga.text_height);
+          SDL_change_mode(0, 0, event.window.data1, event.window.data2);
           break;
         }
 #endif
@@ -1099,8 +1083,8 @@ static void SDL_draw_string(void *opaque, int x, int y, unsigned char *text, int
   SDL_Texture *txt = SDL_CreateTextureFromSurface(renderer, srf);
 
   SDL_Rect rect;
-  rect.x = font_width * x;
-  rect.y = font_height * y; /* height plus spacing to next line */
+  rect.x = offset_x + font_width * x;
+  rect.y = offset_y + font_height * y; /* height plus spacing to next line */
   rect.w = srf->w;
   rect.h = srf->h;
 
@@ -1127,10 +1111,10 @@ static void SDL_draw_line(void *opaque, int x, int y, int len)
 
   pthread_mutex_lock(&rend_mtx);
   SDL_RenderDrawLine(renderer,
-      font_width * x,
-      font_height * y,
-      font_width * (x + len) - 1,
-      font_height * y
+      offset_x + font_width * x,
+      offset_y + font_height * y,
+      offset_x + font_width * (x + len) - 1,
+      offset_y + font_height * y
   );
   pthread_mutex_unlock(&rend_mtx);
 
@@ -1152,8 +1136,8 @@ static void SDL_draw_text_cursor(void *opaque, int x, int y, Bit8u attr,
     return;
 
   if (!focus) {
-    rect.x = font_width * x;
-    rect.y = font_height * y;
+    rect.x = offset_x + font_width * x;
+    rect.y = offset_y + font_height * y;
     rect.w = font_width;
     rect.h = font_height - 1;
 
@@ -1176,8 +1160,8 @@ static void SDL_draw_text_cursor(void *opaque, int x, int y, Bit8u attr,
     if (cend == -1)
       cend = 0;
 
-    rect.x = font_width * x;
-    rect.y = font_height * y + cstart;
+    rect.x = offset_x + font_width * x;
+    rect.y = offset_y + font_height * y + cstart;
     rect.w = font_width;
     rect.h = cend - cstart + 1;
 
