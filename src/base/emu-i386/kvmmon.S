@@ -60,20 +60,6 @@ kvm_mon_main:
 	.globl kvm_mon_hlt
 kvm_mon_hlt:
         hlt
-        pop %eax
-        pop %ebx
-        pop %ecx
-        pop %edx
-        pop %esi
-        pop %edi
-        pop %ebp
-        pop %eax
-        pop %ds
-        pop %es
-        pop %fs
-        pop %gs
-        add $0x4,%esp
-        iret
 
 	.globl kvm_mon_end
 kvm_mon_end:

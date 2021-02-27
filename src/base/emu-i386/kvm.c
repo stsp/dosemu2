@@ -90,6 +90,11 @@ extern char kvm_mon_end[];
 #define PG_RW 2
 #define PG_USER 4
 
+struct mon_stack {
+    unsigned int cr2;
+    struct vm86_regs regs;
+};
+
 static struct monitor {
     Task tss;                                /* 0000 */
     /* tss.esp0                                 0004 */
@@ -107,10 +112,8 @@ static struct monitor {
     Gatedesc idt[IDT_ENTRIES];               /* 2200 */
     unsigned char padding2[0x3000-0x2200
 	-IDT_ENTRIES*sizeof(Gatedesc)
-	-sizeof(unsigned int)
-	-sizeof(struct vm86_regs)];          /* 2308 */
-    unsigned int cr2;         /* Fault stack at 2FA8 */
-    struct vm86_regs regs;
+	-sizeof(struct mon_stack)];          /* 2308 */
+    struct mon_stack stack;                  /* Fault stack */
     /* 3000: page directory, 4000: page table */
     unsigned int pde[PAGE_SIZE/sizeof(unsigned int)];
     unsigned int pte[(PAGE_SIZE*PAGE_SIZE)/sizeof(unsigned int)
@@ -732,7 +735,7 @@ static void set_ldt_seg(struct kvm_segment *seg, unsigned selector)
   seg->unusable = !desc->present;
 }
 
-static int kvm_post_run(struct vm86_regs *regs)
+static int kvm_post_run(void)
 {
   struct kvm_regs *kregs = &run->s.regs.regs;
   struct kvm_sregs *sregs = &run->s.regs.sregs;
@@ -756,38 +759,12 @@ static int kvm_post_run(struct vm86_regs *regs)
     g_printf("KVM: interrupt in GDT code, resuming\n");
     return 0;
   }
-
-  regs->eax = kregs->rax;
-  regs->ebx = kregs->rbx;
-  regs->ecx = kregs->rcx;
-  regs->edx = kregs->rdx;
-  regs->esi = kregs->rsi;
-  regs->edi = kregs->rdi;
-  regs->ebp = kregs->rbp;
-  regs->esp = kregs->rsp;
-  regs->eip = kregs->rip;
-  regs->eflags = kregs->rflags;
-
-  regs->cs = sregs->cs.selector;
-  regs->ss = sregs->ss.selector;
-  if (kregs->rflags & X86_EFLAGS_VM) {
-    regs->ds = sregs->ds.selector;
-    regs->es = sregs->es.selector;
-    regs->fs = sregs->fs.selector;
-    regs->gs = sregs->gs.selector;
-  } else {
-    regs->__null_ds = sregs->ds.selector;
-    regs->__null_es = sregs->es.selector;
-    regs->__null_fs = sregs->fs.selector;
-    regs->__null_gs = sregs->gs.selector;
-  }
   return 1;
 }
 
-/* Inner loop for KVM, runs until HLT or signal */
-static unsigned int kvm_run(struct vm86_regs *regs)
+static void kvm_sync_regs(void)
 {
-  unsigned int exit_reason = 0;
+  struct vm86_regs *regs = &monitor->stack.regs;
   struct kvm_regs *kregs = &run->s.regs.regs;
   struct kvm_sregs *sregs = &run->s.regs.sregs;
 
@@ -819,6 +796,12 @@ static unsigned int kvm_run(struct vm86_regs *regs)
     set_ldt_seg(&sregs->ss, regs->ss);
   }
   run->kvm_dirty_regs |= KVM_SYNC_X86_SREGS;
+}
+
+/* Inner loop for KVM, runs until HLT or signal */
+static unsigned int kvm_run(void)
+{
+  unsigned int exit_reason = 0;
 
   while (!exit_reason) {
     int ret = ioctl(vcpufd, KVM_RUN, NULL);
@@ -846,7 +829,7 @@ static unsigned int kvm_run(struct vm86_regs *regs)
     }
 
     if (ret == -1 && errn == EINTR) {
-      if (!kvm_post_run(regs))
+      if (!kvm_post_run())
         continue;
       exit_reason = KVM_EXIT_INTR;
       break;
@@ -857,12 +840,13 @@ static unsigned int kvm_run(struct vm86_regs *regs)
 
     switch (run->exit_reason) {
     case KVM_EXIT_HLT:
+      kvm_sync_regs();
       exit_reason = KVM_EXIT_HLT;
       break;
     case KVM_EXIT_IRQ_WINDOW_OPEN:
       run->request_interrupt_window = !run->ready_for_interrupt_injection;
       if (run->request_interrupt_window || !run->if_flag) break;
-      if (!kvm_post_run(regs))
+      if (!kvm_post_run())
         break;
 
       exit_reason = KVM_EXIT_IRQ_WINDOW_OPEN;
@@ -907,28 +891,64 @@ static void kvm_vme_tf_popf_fixup(struct vm86_regs *regs)
 /* Emulate vm86() using KVM */
 int kvm_vm86(struct vm86_struct *info)
 {
-  struct vm86_regs *regs;
   int vm86_ret;
   unsigned int trapno, exit_reason;
+  struct vm86_regs *regs = &info->regs;
+  struct kvm_regs *kregs = &run->s.regs.regs;
   struct kvm_sregs *sregs = &run->s.regs.sregs;
 
-  regs = &monitor->regs;
-  *regs = info->regs;
   monitor->int_revectored = info->int_revectored;
-  monitor->tss.esp0 = offsetof(struct monitor, regs) + sizeof(monitor->regs);
-
-  regs->eflags &= (SAFE_MASK | X86_EFLAGS_VIF | X86_EFLAGS_VIP);
-  regs->eflags |= X86_EFLAGS_FIXED | X86_EFLAGS_VM | X86_EFLAGS_IF;
+  monitor->tss.esp0 = offsetof(struct monitor, stack) + sizeof(monitor->stack);
 
   do {
-    exit_reason = kvm_run(regs);
+    kregs->rax = regs->eax;
+    kregs->rbx = regs->ebx;
+    kregs->rcx = regs->ecx;
+    kregs->rdx = regs->edx;
+    kregs->rsi = regs->esi;
+    kregs->rdi = regs->edi;
+    kregs->rbp = regs->ebp;
+    kregs->rsp = regs->esp;
+    kregs->rip = regs->eip;
+    kregs->rflags = regs->eflags;
+    kregs->rflags &= (SAFE_MASK | X86_EFLAGS_VIF | X86_EFLAGS_VIP);
+    kregs->rflags |= X86_EFLAGS_FIXED | X86_EFLAGS_VM | X86_EFLAGS_IF;
+    run->kvm_dirty_regs |= KVM_SYNC_X86_REGS;
+    set_vm86_seg(&sregs->cs, regs->cs);
+    set_vm86_seg(&sregs->ds, regs->ds);
+    set_vm86_seg(&sregs->es, regs->es);
+    set_vm86_seg(&sregs->fs, regs->fs);
+    set_vm86_seg(&sregs->gs, regs->gs);
+    set_vm86_seg(&sregs->ss, regs->ss);
+    run->kvm_dirty_regs |= KVM_SYNC_X86_SREGS;
+
+    exit_reason = kvm_run();
+
+    regs->eax = kregs->rax;
+    regs->ebx = kregs->rbx;
+    regs->ecx = kregs->rcx;
+    regs->edx = kregs->rdx;
+    regs->esi = kregs->rsi;
+    regs->edi = kregs->rdi;
+    regs->ebp = kregs->rbp;
+    regs->esp = kregs->rsp;
+    regs->eip = kregs->rip;
+    regs->eflags = kregs->rflags;
+    regs->eflags |= X86_EFLAGS_IOPL;
+
+    regs->cs = sregs->cs.selector;
+    regs->ss = sregs->ss.selector;
+    regs->ds = sregs->ds.selector;
+    regs->es = sregs->es.selector;
+    regs->fs = sregs->fs.selector;
+    regs->gs = sregs->gs.selector;
 
     vm86_ret = VM86_SIGNAL;
     if (exit_reason != KVM_EXIT_HLT) break;
 
     /* high word(orig_eax) = exception number */
     /* low word(orig_eax) = error code */
-    trapno = (regs->orig_eax >> 16) & 0xff;
+    trapno = (monitor->stack.regs.orig_eax >> 16) & 0xff;
 #if 1
     if (trapno == 1 && (sregs->cr4 & X86_CR4_VME))
       kvm_vme_tf_popf_fixup(regs);
@@ -939,17 +959,15 @@ int kvm_vm86(struct vm86_struct *info)
       vm86_ret = kvm_handle_vm86_fault(regs, info->cpu_type);
   } while (vm86_ret == -1);
 
-  info->regs = *regs;
-  info->regs.eflags |= X86_EFLAGS_IOPL;
   if (vm86_ret == VM86_SIGNAL && exit_reason == KVM_EXIT_HLT) {
-    unsigned trapno = (regs->orig_eax >> 16) & 0xff;
-    unsigned err = regs->orig_eax & 0xffff;
+    unsigned trapno = (monitor->stack.regs.orig_eax >> 16) & 0xff;
+    unsigned err = monitor->stack.regs.orig_eax & 0xffff;
     if (trapno == 0x0e &&
-	(vga_emu_fault(monitor->cr2, err, NULL) == True || (
+	(vga_emu_fault(monitor->stack.cr2, err, NULL) == True || (
 	 config.cpu_vm_dpmi == CPUVM_EMU && !config.cpusim &&
-	 e_handle_pagefault(monitor->cr2, err, NULL))))
+	 e_handle_pagefault(monitor->stack.cr2, err, NULL))))
       return vm86_ret;
-    vm86_fault(trapno, err, monitor->cr2);
+    vm86_fault(trapno, err, monitor->stack.cr2);
   }
   return vm86_ret;
 }
@@ -957,65 +975,64 @@ int kvm_vm86(struct vm86_struct *info)
 /* Emulate do_dpmi_control() using KVM */
 int kvm_dpmi(sigcontext_t *scp)
 {
-  struct vm86_regs *regs;
   int ret;
   unsigned int exit_reason;
+  struct kvm_regs *kregs = &run->s.regs.regs;
+  struct kvm_sregs *sregs = &run->s.regs.sregs;
 
-  monitor->tss.esp0 = offsetof(struct monitor, regs) +
-    offsetof(struct vm86_regs, es);
+  monitor->tss.esp0 = offsetof(struct monitor, stack.regs.es);
 
-  regs = &monitor->regs;
   do {
-    regs->eax = _eax;
-    regs->ebx = _ebx;
-    regs->ecx = _ecx;
-    regs->edx = _edx;
-    regs->esi = _esi;
-    regs->edi = _edi;
-    regs->ebp = _ebp;
-    regs->esp = _esp;
-    regs->eip = _eip;
+    kregs->rax = _eax;
+    kregs->rbx = _ebx;
+    kregs->rcx = _ecx;
+    kregs->rdx = _edx;
+    kregs->rsi = _esi;
+    kregs->rdi = _edi;
+    kregs->rbp = _ebp;
+    kregs->rsp = _esp;
+    kregs->rip = _eip;
+    kregs->rflags = _eflags;
+    kregs->rflags &= (SAFE_MASK | X86_EFLAGS_VIF | X86_EFLAGS_VIP);
+    kregs->rflags |= X86_EFLAGS_FIXED | X86_EFLAGS_IF;
+    run->kvm_dirty_regs |= KVM_SYNC_X86_REGS;
 
-    regs->cs = _cs;
-    regs->__null_ds = _ds;
-    regs->__null_es = _es;
-    regs->ss = _ss;
-    regs->__null_fs = _fs;
-    regs->__null_gs = _gs;
+    set_ldt_seg(&sregs->cs, _cs);
+    set_ldt_seg(&sregs->ds, _ds);
+    set_ldt_seg(&sregs->es, _es);
+    set_ldt_seg(&sregs->ss, _ss);
+    set_ldt_seg(&sregs->fs, _fs);
+    set_ldt_seg(&sregs->gs, _gs);
+    run->kvm_dirty_regs |= KVM_SYNC_X86_SREGS;
 
-    regs->eflags = _eflags;
-    regs->eflags &= (SAFE_MASK | X86_EFLAGS_VIF | X86_EFLAGS_VIP);
-    regs->eflags |= X86_EFLAGS_FIXED | X86_EFLAGS_IF;
+    exit_reason = kvm_run();
 
-    exit_reason = kvm_run(regs);
-
-    _eax = regs->eax;
-    _ebx = regs->ebx;
-    _ecx = regs->ecx;
-    _edx = regs->edx;
-    _esi = regs->esi;
-    _edi = regs->edi;
-    _ebp = regs->ebp;
-    _esp = regs->esp;
-    _eip = regs->eip;
-
-    _cs = regs->cs;
-    _ds = regs->__null_ds;
-    _es = regs->__null_es;
-    _ss = regs->ss;
-    _fs = regs->__null_fs;
-    _gs = regs->__null_gs;
-
-    _eflags = regs->eflags;
+    _eax = kregs->rax;
+    _ebx = kregs->rbx;
+    _ecx = kregs->rcx;
+    _edx = kregs->rdx;
+    _esi = kregs->rsi;
+    _edi = kregs->rdi;
+    _ebp = kregs->rbp;
+    _esp = kregs->rsp;
+    _eip = kregs->rip;
+    _eflags = kregs->rflags;
     _eflags |= X86_EFLAGS_IOPL;
+
+    _cs = sregs->cs.selector;
+    _ds = sregs->ds.selector;
+    _es = sregs->es.selector;
+    _ss = sregs->ss.selector;
+    _fs = sregs->fs.selector;
+    _gs = sregs->gs.selector;
 
     ret = DPMI_RET_DOSEMU; /* mirroring sigio/sigalrm */
     if (exit_reason == KVM_EXIT_HLT) {
       /* orig_eax >> 16 = exception number */
       /* orig_eax & 0xffff = error code */
-      _cr2 = (uintptr_t)MEM_BASE32(monitor->cr2);
-      _trapno = (regs->orig_eax >> 16) & 0xff;
-      _err = regs->orig_eax & 0xffff;
+      _cr2 = (uintptr_t)MEM_BASE32(monitor->stack.cr2);
+      _trapno = (monitor->stack.regs.orig_eax >> 16) & 0xff;
+      _err = monitor->stack.regs.orig_eax & 0xffff;
       if (_trapno > 0x10) {
 	// convert software ints into the GPFs that the DPMI code expects
 	_err = (_trapno << 3) + 2;
@@ -1050,9 +1067,9 @@ int kvm_dpmi(sigcontext_t *scp)
         pic_request(PIC_IRQ13);
         ret = DPMI_RET_DOSEMU;
       } else if (_trapno == 0x0e &&
-	    (vga_emu_fault(monitor->cr2, _err, scp) == True || (
+	    (vga_emu_fault(monitor->stack.cr2, _err, scp) == True || (
 	    config.cpu_vm == CPUVM_EMU && !config.cpusim &&
-	    e_handle_pagefault(monitor->cr2, _err, scp))))
+	    e_handle_pagefault(monitor->stack.cr2, _err, scp))))
 	ret = dpmi_check_return();
       else
 	ret = dpmi_fault(scp);
