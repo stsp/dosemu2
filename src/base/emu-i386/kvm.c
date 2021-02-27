@@ -52,10 +52,6 @@
 #define RETURN_MASK ((SAFE_MASK | 0x28 | X86_EFLAGS_FIXED) & \
                      ~X86_EFLAGS_RF) // 0x244dff
 
-extern char kvm_mon_start[];
-extern char kvm_mon_hlt[];
-extern char kvm_mon_end[];
-
 /* V86/DPMI monitor structure to run code in V86 mode with VME enabled
    or DPMI clients inside KVM
    This contains:
@@ -123,21 +119,16 @@ static struct monitor {
     Gatedesc idt[IDT_ENTRIES];               /* 2200 */
     unsigned char padding2[0x3000-0x2200
 	-IDT_ENTRIES*sizeof(Gatedesc)
-	-sizeof(struct mon_stack)];          /* 2308 */
+	-sizeof(struct mon_stack)
+	-sizeof(unsigned int)];              /* 2308 */
     struct mon_stack stack;                  /* Fault stack */
+    unsigned int trapno;
     /* 3000: page directory, 4000: page table */
     unsigned int pde[PAGE_SIZE/sizeof(unsigned int)];
     unsigned int pte[(PAGE_SIZE*PAGE_SIZE)/sizeof(unsigned int)
 		     /sizeof(unsigned int)];
     Descriptor ldt[LDT_ENTRIES];             /* 404000 */
-    unsigned char code[256 * 32 + PAGE_SIZE];         /* 414000 */
-    /* 414000 IDT exception 0 code start
-       414010 IDT exception 1 code start
-       .... ....
-       414ff0 IDT exception 0xff code start
-       415000 IDT common code start
-       415024 IDT common code end
-    */
+    unsigned char code[PAGE_SIZE];           /* 414000 */
     unsigned char kvm_tss[3*PAGE_SIZE];
     unsigned char kvm_identity_map[20*PAGE_SIZE];
 } *monitor;
@@ -156,7 +147,7 @@ static int init_kvm_vcpu(void);
 
 static void set_idt_default(dosaddr_t mon, int i)
 {
-    unsigned int offs = mon + offsetof(struct monitor, code) + i * 32;
+    unsigned int offs = mon + offsetof(struct monitor, code) + i;
     monitor->idt[i].offs_lo = offs & 0xffff;
     monitor->idt[i].offs_hi = offs >> 16;
     monitor->idt[i].seg = 0x8; // FLAT_CODE_SEL
@@ -278,8 +269,8 @@ void init_kvm_monitor(void)
     set_idt_default(sregs->tr.base, i);
     monitor->idt[i].present = 1;
   }
-  assert(kvm_mon_end - kvm_mon_start <= sizeof(monitor->code));
-  memcpy(monitor->code, kvm_mon_start, kvm_mon_end - kvm_mon_start);
+  /* put HLTs in */
+  memset(monitor->code, 0xf4, IDT_ENTRIES);
 
   /* setup paging */
   sregs->cr3 = sregs->tr.base + offsetof(struct monitor, pde);
@@ -777,6 +768,7 @@ static void kvm_sync_regs(void)
 {
   struct kvm_regs *kregs = &run->s.regs.regs;
   struct kvm_sregs *sregs = &run->s.regs.sregs;
+  int inum;
 
   if (!(run->kvm_valid_regs & KVM_SYNC_X86_REGS)) {
     int ret = ioctl(vcpufd, KVM_GET_REGS, kregs);
@@ -792,6 +784,11 @@ static void kvm_sync_regs(void)
       leavedos_main(99);
     }
   }
+
+  /* Surprisingly, KVM bypasses HLT, so we need -1 here. */
+  inum = kregs->rip - DOSADDR_REL(monitor->code) - 1;
+  g_printf("KVM: int/exc %x\n", inum);
+  monitor->trapno = inum;
 
   kregs->rsp = monitor->stack.esp;
   kregs->rip = monitor->stack.eip;
@@ -962,7 +959,7 @@ int kvm_vm86(struct vm86_struct *info)
 
     /* high word(orig_eax) = exception number */
     /* low word(orig_eax) = error code */
-    trapno = (monitor->stack.err >> 16) & 0xff;
+    trapno = monitor->trapno;
 #if 1
     if (trapno == 1 && (sregs->cr4 & X86_CR4_VME))
       kvm_vme_tf_popf_fixup(regs);
@@ -974,8 +971,8 @@ int kvm_vm86(struct vm86_struct *info)
   } while (vm86_ret == -1);
 
   if (vm86_ret == VM86_SIGNAL && exit_reason == KVM_EXIT_HLT) {
-    unsigned trapno = (monitor->stack.err >> 16) & 0xff;
-    unsigned err = monitor->stack.err & 0xffff;
+    unsigned trapno = monitor->trapno;
+    unsigned err = monitor->stack.err;
     if (trapno == 0x0e &&
 	(vga_emu_fault(sregs->cr2, err, NULL) == True || (
 	 config.cpu_vm_dpmi == CPUVM_EMU && !config.cpusim &&
@@ -1045,8 +1042,8 @@ int kvm_dpmi(sigcontext_t *scp)
       /* orig_eax >> 16 = exception number */
       /* orig_eax & 0xffff = error code */
       _cr2 = (uintptr_t)MEM_BASE32(sregs->cr2);
-      _trapno = (monitor->stack.err >> 16) & 0xff;
-      _err = monitor->stack.err & 0xffff;
+      _trapno = monitor->trapno;
+      _err = monitor->stack.err;
       if (_trapno > 0x10) {
 	// convert software ints into the GPFs that the DPMI code expects
 	_err = (_trapno << 3) + 2;
