@@ -134,7 +134,6 @@ static struct kvm_cpuid2 *cpuid;
 static struct kvm_run *run;
 static int kvmfd, vmfd, vcpufd;
 static volatile int mprotected_kvm = 0;
-static struct kvm_sregs sregs;
 
 #define MAXSLOT 400
 static struct kvm_userspace_memory_region maps[MAXSLOT];
@@ -189,6 +188,7 @@ void kvm_set_idt(int i, uint16_t sel, uint32_t offs, int is_32, int tg)
 void init_kvm_monitor(void)
 {
   int ret, i;
+  struct kvm_sregs *sregs;
 
   /* create monitor structure in memory */
   monitor = mmap_mapping_ux(MAPPING_SCRATCH | MAPPING_KVM, (void *)-1,
@@ -201,47 +201,49 @@ void init_kvm_monitor(void)
     return;
   }
 
-  ret = ioctl(vcpufd, KVM_GET_SREGS, &sregs);
+  sregs = &run->s.regs.sregs;
+  ret = ioctl(vcpufd, KVM_GET_SREGS, sregs);
   if (ret == -1) {
     perror("KVM: KVM_GET_SREGS");
     leavedos(99);
     return;
   }
+  run->kvm_dirty_regs |= KVM_SYNC_X86_SREGS;
 
-  sregs.tr.base = DOSADDR_REL((unsigned char *)monitor);
-  sregs.tr.limit = offsetof(struct monitor, io_bitmap) + TSS_IOPB_SIZE;
-  sregs.tr.unusable = 0;
-  sregs.tr.type = 0xb;
-  sregs.tr.s = 0;
-  sregs.tr.dpl = 0;
-  sregs.tr.present = 1;
-  sregs.tr.avl = 0;
-  sregs.tr.l = 0;
-  sregs.tr.db = 0;
-  sregs.tr.g = 0;
+  sregs->tr.base = DOSADDR_REL((unsigned char *)monitor);
+  sregs->tr.limit = offsetof(struct monitor, io_bitmap) + TSS_IOPB_SIZE;
+  sregs->tr.unusable = 0;
+  sregs->tr.type = 0xb;
+  sregs->tr.s = 0;
+  sregs->tr.dpl = 0;
+  sregs->tr.present = 1;
+  sregs->tr.avl = 0;
+  sregs->tr.l = 0;
+  sregs->tr.db = 0;
+  sregs->tr.g = 0;
 
 #ifdef X86_EMULATOR
   LDT = monitor->ldt;
 #endif
   ldt_buffer = (unsigned char *)monitor->ldt;
-  sregs.ldt.base = sregs.tr.base + offsetof(struct monitor, ldt);
-  sregs.ldt.limit = LDT_ENTRIES * LDT_ENTRY_SIZE - 1;
-  sregs.ldt.unusable = 0;
-  sregs.ldt.type = 0x2;
-  sregs.ldt.s = 0;
-  sregs.ldt.dpl = 0;
-  sregs.ldt.present = 1;
-  sregs.ldt.avl = 0;
-  sregs.ldt.l = 0;
-  sregs.ldt.db = 0;
-  sregs.ldt.g = 0;
+  sregs->ldt.base = sregs->tr.base + offsetof(struct monitor, ldt);
+  sregs->ldt.limit = LDT_ENTRIES * LDT_ENTRY_SIZE - 1;
+  sregs->ldt.unusable = 0;
+  sregs->ldt.type = 0x2;
+  sregs->ldt.s = 0;
+  sregs->ldt.dpl = 0;
+  sregs->ldt.present = 1;
+  sregs->ldt.avl = 0;
+  sregs->ldt.l = 0;
+  sregs->ldt.db = 0;
+  sregs->ldt.g = 0;
 
   monitor->tss.ss0 = 0x10;
   monitor->tss.IOmapbase = offsetof(struct monitor, io_bitmap);
 
   // setup GDT
-  sregs.gdt.base = sregs.tr.base + offsetof(struct monitor, gdt);
-  sregs.gdt.limit = GDT_ENTRIES * sizeof(Descriptor) - 1;
+  sregs->gdt.base = sregs->tr.base + offsetof(struct monitor, gdt);
+  sregs->gdt.limit = GDT_ENTRIES * sizeof(Descriptor) - 1;
   for (i=1; i<GDT_ENTRIES; i++) {
     monitor->gdt[i].limit_lo = 0xffff;
     monitor->gdt[i].type = 0xa;
@@ -253,43 +255,43 @@ void init_kvm_monitor(void)
   }
   // based data selector (0x10), to avoid the ESP register corruption bug
   monitor->gdt[GDT_ENTRIES-1].type = 2;
-  MKBASE(&monitor->gdt[GDT_ENTRIES-1], sregs.tr.base);
+  MKBASE(&monitor->gdt[GDT_ENTRIES-1], sregs->tr.base);
 
-  sregs.idt.base = sregs.tr.base + offsetof(struct monitor, idt);
-  sregs.idt.limit = IDT_ENTRIES * sizeof(Gatedesc)-1;
+  sregs->idt.base = sregs->tr.base + offsetof(struct monitor, idt);
+  sregs->idt.limit = IDT_ENTRIES * sizeof(Gatedesc)-1;
   // setup IDT
   for (i=0; i<IDT_ENTRIES; i++) {
-    set_idt_default(sregs.tr.base, i);
+    set_idt_default(sregs->tr.base, i);
     monitor->idt[i].present = 1;
   }
   assert(kvm_mon_end - kvm_mon_start <= sizeof(monitor->code));
   memcpy(monitor->code, kvm_mon_start, kvm_mon_end - kvm_mon_start);
 
   /* setup paging */
-  sregs.cr3 = sregs.tr.base + offsetof(struct monitor, pde);
+  sregs->cr3 = sregs->tr.base + offsetof(struct monitor, pde);
   /* base PDE; others derive from this one */
-  monitor->pde[0] = (sregs.tr.base + offsetof(struct monitor, pte))
+  monitor->pde[0] = (sregs->tr.base + offsetof(struct monitor, pte))
     | (PG_PRESENT | PG_RW | PG_USER);
-  mprotect_kvm(MAPPING_KVM, sregs.tr.base, offsetof(struct monitor, code),
+  mprotect_kvm(MAPPING_KVM, sregs->tr.base, offsetof(struct monitor, code),
 	       PROT_READ | PROT_WRITE);
-  mprotect_kvm(MAPPING_KVM, sregs.tr.base + offsetof(struct monitor, code),
+  mprotect_kvm(MAPPING_KVM, sregs->tr.base + offsetof(struct monitor, code),
 	       sizeof(monitor->code), PROT_READ | PROT_EXEC);
 
-  sregs.cr0 |= X86_CR0_PE | X86_CR0_PG | X86_CR0_NE | X86_CR0_ET;
-  sregs.cr4 |= X86_CR4_VME;
+  sregs->cr0 |= X86_CR0_PE | X86_CR0_PG | X86_CR0_NE | X86_CR0_ET;
+  sregs->cr4 |= X86_CR4_VME;
 
   /* setup registers to point to VM86 monitor */
-  sregs.cs.base = 0;
-  sregs.cs.limit = 0xffffffff;
-  sregs.cs.selector = 0x8;
-  sregs.cs.db = 1;
-  sregs.cs.g = 1;
+  sregs->cs.base = 0;
+  sregs->cs.limit = 0xffffffff;
+  sregs->cs.selector = 0x8;
+  sregs->cs.db = 1;
+  sregs->cs.g = 1;
 
-  sregs.ss.base = sregs.tr.base;
-  sregs.ss.limit = 0xffffffff;
-  sregs.ss.selector = 0x10;
-  sregs.ss.db = 1;
-  sregs.ss.g = 1;
+  sregs->ss.base = sregs->tr.base;
+  sregs->ss.limit = 0xffffffff;
+  sregs->ss.selector = 0x10;
+  sregs->ss.db = 1;
+  sregs->ss.g = 1;
 
   if (config.cpu_vm == CPUVM_KVM)
     warn("Using V86 mode inside KVM\n");
@@ -733,6 +735,7 @@ static void set_ldt_seg(struct kvm_segment *seg, unsigned selector)
 static int kvm_post_run(struct vm86_regs *regs)
 {
   struct kvm_regs *kregs = &run->s.regs.regs;
+  struct kvm_sregs *sregs = &run->s.regs.sregs;
 
   if (!(run->kvm_valid_regs & KVM_SYNC_X86_REGS)) {
     int ret = ioctl(vcpufd, KVM_GET_REGS, kregs);
@@ -742,14 +745,14 @@ static int kvm_post_run(struct vm86_regs *regs)
     }
   }
   if (!(run->kvm_valid_regs & KVM_SYNC_X86_SREGS)) {
-    int ret = ioctl(vcpufd, KVM_GET_SREGS, &sregs);
+    int ret = ioctl(vcpufd, KVM_GET_SREGS, sregs);
     if (ret == -1) {
       perror("KVM: KVM_GET_SREGS");
       leavedos_main(99);
     }
   }
   /* don't interrupt GDT code */
-  if (!(kregs->rflags & X86_EFLAGS_VM) && !(sregs.cs.selector & 4)) {
+  if (!(kregs->rflags & X86_EFLAGS_VM) && !(sregs->cs.selector & 4)) {
     g_printf("KVM: interrupt in GDT code, resuming\n");
     return 0;
   }
@@ -765,18 +768,18 @@ static int kvm_post_run(struct vm86_regs *regs)
   regs->eip = kregs->rip;
   regs->eflags = kregs->rflags;
 
-  regs->cs = sregs.cs.selector;
-  regs->ss = sregs.ss.selector;
+  regs->cs = sregs->cs.selector;
+  regs->ss = sregs->ss.selector;
   if (kregs->rflags & X86_EFLAGS_VM) {
-    regs->ds = sregs.ds.selector;
-    regs->es = sregs.es.selector;
-    regs->fs = sregs.fs.selector;
-    regs->gs = sregs.gs.selector;
+    regs->ds = sregs->ds.selector;
+    regs->es = sregs->es.selector;
+    regs->fs = sregs->fs.selector;
+    regs->gs = sregs->gs.selector;
   } else {
-    regs->__null_ds = sregs.ds.selector;
-    regs->__null_es = sregs.es.selector;
-    regs->__null_fs = sregs.fs.selector;
-    regs->__null_gs = sregs.gs.selector;
+    regs->__null_ds = sregs->ds.selector;
+    regs->__null_es = sregs->es.selector;
+    regs->__null_fs = sregs->fs.selector;
+    regs->__null_gs = sregs->gs.selector;
   }
   return 1;
 }
@@ -786,6 +789,7 @@ static unsigned int kvm_run(struct vm86_regs *regs)
 {
   unsigned int exit_reason = 0;
   struct kvm_regs *kregs = &run->s.regs.regs;
+  struct kvm_sregs *sregs = &run->s.regs.sregs;
 
   kregs->rax = regs->eax;
   kregs->rbx = regs->ebx;
@@ -800,21 +804,20 @@ static unsigned int kvm_run(struct vm86_regs *regs)
   run->kvm_dirty_regs |= KVM_SYNC_X86_REGS;
 
   if (regs->eflags & X86_EFLAGS_VM) {
-    set_vm86_seg(&sregs.cs, regs->cs);
-    set_vm86_seg(&sregs.ds, regs->ds);
-    set_vm86_seg(&sregs.es, regs->es);
-    set_vm86_seg(&sregs.fs, regs->fs);
-    set_vm86_seg(&sregs.gs, regs->gs);
-    set_vm86_seg(&sregs.ss, regs->ss);
+    set_vm86_seg(&sregs->cs, regs->cs);
+    set_vm86_seg(&sregs->ds, regs->ds);
+    set_vm86_seg(&sregs->es, regs->es);
+    set_vm86_seg(&sregs->fs, regs->fs);
+    set_vm86_seg(&sregs->gs, regs->gs);
+    set_vm86_seg(&sregs->ss, regs->ss);
   } else {
-    set_ldt_seg(&sregs.cs, regs->cs);
-    set_ldt_seg(&sregs.ds, regs->__null_ds);
-    set_ldt_seg(&sregs.es, regs->__null_es);
-    set_ldt_seg(&sregs.fs, regs->__null_fs);
-    set_ldt_seg(&sregs.gs, regs->__null_gs);
-    set_ldt_seg(&sregs.ss, regs->ss);
+    set_ldt_seg(&sregs->cs, regs->cs);
+    set_ldt_seg(&sregs->ds, regs->__null_ds);
+    set_ldt_seg(&sregs->es, regs->__null_es);
+    set_ldt_seg(&sregs->fs, regs->__null_fs);
+    set_ldt_seg(&sregs->gs, regs->__null_gs);
+    set_ldt_seg(&sregs->ss, regs->ss);
   }
-  run->s.regs.sregs = sregs;
   run->kvm_dirty_regs |= KVM_SYNC_X86_SREGS;
 
   while (!exit_reason) {
@@ -907,6 +910,7 @@ int kvm_vm86(struct vm86_struct *info)
   struct vm86_regs *regs;
   int vm86_ret;
   unsigned int trapno, exit_reason;
+  struct kvm_sregs *sregs = &run->s.regs.sregs;
 
   regs = &monitor->regs;
   *regs = info->regs;
@@ -926,7 +930,7 @@ int kvm_vm86(struct vm86_struct *info)
     /* low word(orig_eax) = error code */
     trapno = (regs->orig_eax >> 16) & 0xff;
 #if 1
-    if (trapno == 1 && (sregs.cr4 & X86_CR4_VME))
+    if (trapno == 1 && (sregs->cr4 & X86_CR4_VME))
       kvm_vme_tf_popf_fixup(regs);
 #endif
     if (trapno == 1 || trapno == 3)
