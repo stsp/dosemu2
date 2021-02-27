@@ -300,6 +300,18 @@ static int init_kvm_vcpu(void)
 {
   int ret, mmap_size;
 
+#ifdef KVM_CAP_SYNC_REGS
+  ret = ioctl(kvmfd, KVM_CHECK_EXTENSION, KVM_CAP_SYNC_REGS);
+  if (ret == -1 || (ret & KVM_SYNC_X86_VALID_FIELDS) !=
+      KVM_SYNC_X86_VALID_FIELDS) {
+    error("KVM: CHECK_EXTENSION(SYNC_REGS) returned %x\n", ret);
+    return 0;
+  }
+#else
+  error("kernel is too old, KVM unsupported\n");
+  return 0;
+#endif
+
   /* this call is only there to shut up the kernel saying
      "KVM_SET_TSS_ADDR need to be called before entering vcpu"
      this is only really needed if the vcpu is started in real mode and
@@ -718,17 +730,23 @@ static void set_ldt_seg(struct kvm_segment *seg, unsigned selector)
   seg->unusable = !desc->present;
 }
 
-static int kvm_post_run(struct vm86_regs *regs, struct kvm_regs *kregs)
+static int kvm_post_run(struct vm86_regs *regs)
 {
-  int ret = ioctl(vcpufd, KVM_GET_REGS, kregs);
-  if (ret == -1) {
-    perror("KVM: KVM_GET_REGS");
-    leavedos_main(99);
+  struct kvm_regs *kregs = &run->s.regs.regs;
+
+  if (!(run->kvm_valid_regs & KVM_SYNC_X86_REGS)) {
+    int ret = ioctl(vcpufd, KVM_GET_REGS, kregs);
+    if (ret == -1) {
+      perror("KVM: KVM_GET_REGS");
+      leavedos_main(99);
+    }
   }
-  ret = ioctl(vcpufd, KVM_GET_SREGS, &sregs);
-  if (ret == -1) {
-    perror("KVM: KVM_GET_SREGS");
-    leavedos_main(99);
+  if (!(run->kvm_valid_regs & KVM_SYNC_X86_SREGS)) {
+    int ret = ioctl(vcpufd, KVM_GET_SREGS, &sregs);
+    if (ret == -1) {
+      perror("KVM: KVM_GET_SREGS");
+      leavedos_main(99);
+    }
   }
   /* don't interrupt GDT code */
   if (!(kregs->rflags & X86_EFLAGS_VM) && !(sregs.cs.selector & 4)) {
@@ -767,53 +785,37 @@ static int kvm_post_run(struct vm86_regs *regs, struct kvm_regs *kregs)
 static unsigned int kvm_run(struct vm86_regs *regs)
 {
   unsigned int exit_reason = 0;
-  struct kvm_regs kregs = {};
-  static struct vm86_regs saved_regs;
+  struct kvm_regs *kregs = &run->s.regs.regs;
 
-  if (run->exit_reason != KVM_EXIT_HLT &&
-      memcmp(regs, &saved_regs, sizeof(*regs))) {
-    /* Only set registers if changes happened, usually
-       this means a hardware interrupt or sometimes
-       a callback, and also for the very first call to boot */
-    int ret;
+  kregs->rax = regs->eax;
+  kregs->rbx = regs->ebx;
+  kregs->rcx = regs->ecx;
+  kregs->rdx = regs->edx;
+  kregs->rsi = regs->esi;
+  kregs->rdi = regs->edi;
+  kregs->rbp = regs->ebp;
+  kregs->rsp = regs->esp;
+  kregs->rip = regs->eip;
+  kregs->rflags = regs->eflags;
+  run->kvm_dirty_regs |= KVM_SYNC_X86_REGS;
 
-    kregs.rax = regs->eax;
-    kregs.rbx = regs->ebx;
-    kregs.rcx = regs->ecx;
-    kregs.rdx = regs->edx;
-    kregs.rsi = regs->esi;
-    kregs.rdi = regs->edi;
-    kregs.rbp = regs->ebp;
-    kregs.rsp = regs->esp;
-    kregs.rip = regs->eip;
-    kregs.rflags = regs->eflags;
-    ret = ioctl(vcpufd, KVM_SET_REGS, &kregs);
-    if (ret == -1) {
-      perror("KVM: KVM_GET_REGS");
-      leavedos_main(99);
-    }
-
-    if (regs->eflags & X86_EFLAGS_VM) {
-      set_vm86_seg(&sregs.cs, regs->cs);
-      set_vm86_seg(&sregs.ds, regs->ds);
-      set_vm86_seg(&sregs.es, regs->es);
-      set_vm86_seg(&sregs.fs, regs->fs);
-      set_vm86_seg(&sregs.gs, regs->gs);
-      set_vm86_seg(&sregs.ss, regs->ss);
-    } else {
-      set_ldt_seg(&sregs.cs, regs->cs);
-      set_ldt_seg(&sregs.ds, regs->__null_ds);
-      set_ldt_seg(&sregs.es, regs->__null_es);
-      set_ldt_seg(&sregs.fs, regs->__null_fs);
-      set_ldt_seg(&sregs.gs, regs->__null_gs);
-      set_ldt_seg(&sregs.ss, regs->ss);
-    }
-    ret = ioctl(vcpufd, KVM_SET_SREGS, &sregs);
-    if (ret == -1) {
-      perror("KVM: KVM_SET_SREGS");
-      leavedos_main(99);
-    }
+  if (regs->eflags & X86_EFLAGS_VM) {
+    set_vm86_seg(&sregs.cs, regs->cs);
+    set_vm86_seg(&sregs.ds, regs->ds);
+    set_vm86_seg(&sregs.es, regs->es);
+    set_vm86_seg(&sregs.fs, regs->fs);
+    set_vm86_seg(&sregs.gs, regs->gs);
+    set_vm86_seg(&sregs.ss, regs->ss);
+  } else {
+    set_ldt_seg(&sregs.cs, regs->cs);
+    set_ldt_seg(&sregs.ds, regs->__null_ds);
+    set_ldt_seg(&sregs.es, regs->__null_es);
+    set_ldt_seg(&sregs.fs, regs->__null_fs);
+    set_ldt_seg(&sregs.gs, regs->__null_gs);
+    set_ldt_seg(&sregs.ss, regs->ss);
   }
+  run->s.regs.sregs = sregs;
+  run->kvm_dirty_regs |= KVM_SYNC_X86_SREGS;
 
   while (!exit_reason) {
     int ret = ioctl(vcpufd, KVM_RUN, NULL);
@@ -841,9 +843,8 @@ static unsigned int kvm_run(struct vm86_regs *regs)
     }
 
     if (ret == -1 && errn == EINTR) {
-      if (!kvm_post_run(regs, &kregs))
+      if (!kvm_post_run(regs))
         continue;
-      saved_regs = *regs;
       exit_reason = KVM_EXIT_INTR;
       break;
     } else if (ret != 0) {
@@ -858,10 +859,9 @@ static unsigned int kvm_run(struct vm86_regs *regs)
     case KVM_EXIT_IRQ_WINDOW_OPEN:
       run->request_interrupt_window = !run->ready_for_interrupt_injection;
       if (run->request_interrupt_window || !run->if_flag) break;
-      if (!kvm_post_run(regs, &kregs))
+      if (!kvm_post_run(regs))
         break;
 
-      saved_regs = *regs;
       exit_reason = KVM_EXIT_IRQ_WINDOW_OPEN;
       break;
     case KVM_EXIT_FAIL_ENTRY:
