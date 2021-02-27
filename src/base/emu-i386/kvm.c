@@ -758,26 +758,26 @@ static int kvm_post_run(void)
   }
   /* don't interrupt GDT code */
   if (!(kregs->rflags & X86_EFLAGS_VM) && !(sregs->cs.selector & 4)) {
-    g_printf("KVM: interrupt in GDT code, resuming\n");
+    g_printf("KVM: interrupt in GDT code\n");
     return 0;
   }
   return 1;
 }
 
-static void kvm_sync_regs(void)
+static void kvm_sync_regs(int valid, int offs)
 {
   struct kvm_regs *kregs = &run->s.regs.regs;
   struct kvm_sregs *sregs = &run->s.regs.sregs;
   int inum;
 
-  if (!(run->kvm_valid_regs & KVM_SYNC_X86_REGS)) {
+  if (!valid && !(run->kvm_valid_regs & KVM_SYNC_X86_REGS)) {
     int ret = ioctl(vcpufd, KVM_GET_REGS, kregs);
     if (ret == -1) {
       perror("KVM: KVM_GET_REGS");
       leavedos_main(99);
     }
   }
-  if (!(run->kvm_valid_regs & KVM_SYNC_X86_SREGS)) {
+  if (!valid && !(run->kvm_valid_regs & KVM_SYNC_X86_SREGS)) {
     int ret = ioctl(vcpufd, KVM_GET_SREGS, sregs);
     if (ret == -1) {
       perror("KVM: KVM_GET_SREGS");
@@ -785,8 +785,8 @@ static void kvm_sync_regs(void)
     }
   }
 
-  /* Surprisingly, KVM bypasses HLT, so we need -1 here. */
-  inum = kregs->rip - DOSADDR_REL(monitor->code) - 1;
+  inum = kregs->rip - DOSADDR_REL(monitor->code) + offs;
+  assert(inum >= 0 && inum < 256);
   g_printf("KVM: int/exc %x\n", inum);
   monitor->trapno = inum;
 
@@ -813,12 +813,10 @@ static void kvm_sync_regs(void)
 static unsigned int kvm_run(void)
 {
   unsigned int exit_reason = 0;
+  int ret = ioctl(vcpufd, KVM_RUN, NULL);
+  int errn = errno;
 
-  while (!exit_reason) {
-    int ret = ioctl(vcpufd, KVM_RUN, NULL);
-    int errn = errno;
-
-    /* KVM should only exit for four reasons:
+  /* KVM should only exit for four reasons:
        1. KVM_EXIT_HLT: at the hlt in kvmmon.S following an exception.
           In this case the registers are pushed on and popped from the stack.
        2. KVM_EXIT_INTR: (with ret==-1) after a signal. In this case we
@@ -833,33 +831,34 @@ static unsigned int kvm_run(void)
           actual page tables; if this happen we retry and it should not happen
           again since the KVM exit/entry makes everything sync'ed.
     */
-    if (mprotected_kvm) { // case 4
-      mprotected_kvm = 0;
-      if (ret == -1 && errn == EFAULT)
-	ret = ioctl(vcpufd, KVM_RUN, NULL);
-    }
+  if (mprotected_kvm) { // case 4
+    mprotected_kvm = 0;
+    if (ret == -1 && errn == EFAULT)
+      ret = ioctl(vcpufd, KVM_RUN, NULL);
+  }
 
-    if (ret == -1 && errn == EINTR) {
-      if (!kvm_post_run())
-        continue;
-      exit_reason = KVM_EXIT_INTR;
-      break;
-    } else if (ret != 0) {
-      perror("KVM: KVM_RUN");
-      leavedos_main(99);
+  if (ret == -1 && errn == EINTR) {
+    if (!kvm_post_run()) {
+      kvm_sync_regs(1, 0);
+      return KVM_EXIT_HLT;
     }
+    return KVM_EXIT_INTR;
+  } else if (ret != 0) {
+    perror("KVM: KVM_RUN");
+    leavedos_main(99);
+  }
 
-    switch (run->exit_reason) {
+  switch (run->exit_reason) {
     case KVM_EXIT_HLT:
-      kvm_sync_regs();
+      /* Surprisingly, KVM bypasses HLT, so we need -1 here. */
+      kvm_sync_regs(0, -1);
       exit_reason = KVM_EXIT_HLT;
       break;
     case KVM_EXIT_IRQ_WINDOW_OPEN:
-      run->request_interrupt_window = !run->ready_for_interrupt_injection;
-      if (run->request_interrupt_window || !run->if_flag) break;
-      if (!kvm_post_run())
-        break;
-
+      if (!kvm_post_run()) {
+        error("KVM: IRQ_WINDOW in ring0?\n");
+        leavedos_main(99);
+      }
       exit_reason = KVM_EXIT_IRQ_WINDOW_OPEN;
       break;
     case KVM_EXIT_FAIL_ENTRY:
@@ -875,7 +874,6 @@ static unsigned int kvm_run(void)
       error("KVM: exit_reason = 0x%x\n", run->exit_reason);
       leavedos_main(99);
       break;
-    }
   }
   return exit_reason;
 }
