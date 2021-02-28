@@ -821,17 +821,12 @@ static unsigned int kvm_run(void)
           In this case the registers are pushed on and popped from the stack.
        2. KVM_EXIT_INTR: (with ret==-1) after a signal. In this case we
           must restore and save registers using ioctls.
-       3. KVM_EXIT_IRQ_WINDOW_OPEN: if it is not possible to inject interrupts
-          (or in our case properly interrupt using reason 2)
-          KVM is re-entered asking it to exit when interrupt injection is
-          possible, then it exits with this code. This only happens if a signal
-          occurs during execution of the monitor code in kvmmon.S.
-       4. ret==-1 and errno == EFAULT: this can happen if code in vgaemu.c
+       3. ret==-1 and errno == EFAULT: this can happen if code in vgaemu.c
           calls mprotect in parallel and the TLB is out of sync with the
           actual page tables; if this happen we retry and it should not happen
           again since the KVM exit/entry makes everything sync'ed.
     */
-  if (mprotected_kvm) { // case 4
+  if (mprotected_kvm) { // case 3
     mprotected_kvm = 0;
     if (ret == -1 && errn == EFAULT)
       ret = ioctl(vcpufd, KVM_RUN, NULL);
@@ -853,13 +848,6 @@ static unsigned int kvm_run(void)
       /* Surprisingly, KVM bypasses HLT, so we need -1 here. */
       kvm_sync_regs(0, -1);
       exit_reason = KVM_EXIT_HLT;
-      break;
-    case KVM_EXIT_IRQ_WINDOW_OPEN:
-      if (!kvm_post_run()) {
-        error("KVM: IRQ_WINDOW in ring0?\n");
-        leavedos_main(99);
-      }
-      exit_reason = KVM_EXIT_IRQ_WINDOW_OPEN;
       break;
     case KVM_EXIT_FAIL_ENTRY:
       error("KVM_EXIT_FAIL_ENTRY: hardware_entry_failure_reason = 0x%llx\n",
